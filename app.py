@@ -72,9 +72,7 @@ def retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top
 
 
 def format_context(selected):
-    return "\n\n".join(
-        f"[Page {item['page']}]\n{item['text']}" for item in selected
-    )
+    return "\n\n".join(f"[Page {item['page']}]\n{item['text']}" for item in selected)
 
 
 def is_summary_question(question):
@@ -86,6 +84,109 @@ def is_summary_question(question):
     if any(d in q for d in doc_words) and any(i in q for i in intents):
         return True
     return q in ["what is it about", "tell me about it", "explain it", "describe it", "what is this about"]
+
+
+def normalize_for_matching(text):
+    # PDF table extraction can split words across spaces/newlines. This keeps
+    # ordinary spaces but also creates a compact version for robust matching.
+    normal = re.sub(r"\s+", " ", text).strip()
+    compact = re.sub(r"\s+", "", text).lower()
+    return normal, compact
+
+
+def extract_exact_field(question, pages):
+    """Extract common label/value fields directly before asking the LLM."""
+    q = question.lower()
+    all_text = "\n".join(p["text"] for p in pages)
+    normal, compact = normalize_for_matching(all_text)
+
+    # Field aliases. Add more business fields here as the project grows.
+    aliases = {
+        "service mode": ["service mode", "service-mode"],
+        "booking number": ["booking number", "booking no", "booking no."],
+        "booking no": ["booking number", "booking no", "booking no."],
+        "commodity": ["commodity description", "commodity"],
+        "price calculation date": ["price calculation date"],
+        "merchant haulage release reference": ["merchant haulage release reference"]
+    }
+
+    requested = None
+    for canonical, names in aliases.items():
+        if any(name in q for name in names):
+            requested = canonical
+            break
+
+    if requested is None:
+        return None
+
+    # Special patterns handle fields commonly found in booking confirmations.
+    patterns = {
+        "service mode": [
+            r"Service\s*Mode\s*:\s*([^\n]{1,40})",
+            r"Service\s*Mode\s*[:\-]?\s*(CY\s*/\s*CY|CFS\s*/\s*CFS|CY\s*/\s*CFS|CFS\s*/\s*CY)"
+        ],
+        "booking number": [
+            r"Booking\s*No\s*\.?\s*:\s*([A-Za-z0-9\-/]+)"
+        ],
+        "booking no": [
+            r"Booking\s*No\s*\.?\s*:\s*([A-Za-z0-9\-/]+)"
+        ],
+        "commodity": [
+            r"Commodity\s*Description\s*:\s*([^\n]{1,120})"
+        ],
+        "price calculation date": [
+            r"Price\s*Calculation\s*Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})"
+        ],
+        "merchant haulage release reference": [
+            r"Merchant\s*Haulage\s*Release\s*Reference\s*:\s*([^\n]{1,120})"
+        ]
+    }
+
+    for pattern in patterns.get(requested, []):
+        match = re.search(pattern, all_text, flags=re.IGNORECASE)
+        if match:
+            value = re.sub(r"\s+", " ", match.group(1)).strip(" :-")
+            # Service Mode extraction can accidentally capture following labels;
+            # prefer the standard CY/CFS code when present.
+            if requested == "service mode":
+                code = re.search(r"\b(CY|CFS)\s*/\s*(CY|CFS)\b", value, flags=re.IGNORECASE)
+                if code:
+                    value = f"{code.group(1).upper()}/{code.group(2).upper()}"
+            if value:
+                return value
+
+    # Compact fallback specifically handles badly split PDF text such as
+    # "B ooking No .:" or labels broken across lines.
+    if requested == "service mode":
+        m = re.search(r"servicemode:(cy/cy|cfs/cfs|cy/cfs|cfs/cy)", compact)
+        if m:
+            return m.group(1).upper()
+
+    if requested in ["booking number", "booking no"]:
+        m = re.search(r"bookingno\.?[:]?([0-9]{5,})", compact)
+        if m:
+            return m.group(1)
+
+    return None
+
+
+def extract_eta_answer(question, pages):
+    q = question.lower()
+    if "eta" not in q and "arrival" not in q:
+        return None
+
+    text = "\n".join(p["text"] for p in pages)
+    dates = re.findall(r"20\d{2}-\d{2}-\d{2}", text)
+    if not dates:
+        return None
+
+    # For final/destination ETA questions, use the last chronological date
+    # appearing in the transport plan/document as a deterministic fallback.
+    if any(word in q for word in ["final", "destination", "auckland"]):
+        unique_dates = sorted(set(dates))
+        return f"The final ETA shown in the document is {unique_dates[-1]}."
+
+    return None
 
 
 def run_llm(prompt, tokenizer, llm_model, max_new_tokens=80):
@@ -100,12 +201,24 @@ def run_llm(prompt, tokenizer, llm_model, max_new_tokens=80):
     return tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
 
 
-def answer_question(question, selected, tokenizer, llm_model):
+def answer_question(question, selected, pages, tokenizer, llm_model):
     context = format_context(selected)
+
+    # 1) Exact extraction first for clear business fields.
+    exact = extract_exact_field(question, pages)
+    if exact:
+        return exact, context
+
+    # 2) Deterministic handling for common ETA/destination questions.
+    eta_answer = extract_eta_answer(question, pages)
+    if eta_answer:
+        return eta_answer, context
+
+    # 3) LLM fallback for natural-language questions and reasoning.
     prompt = f"""Answer the question using ONLY the context below.
 Read tables and label-value fields carefully.
+Copy exact names, codes, numbers and dates from the context when answering factual questions.
 If several values match the question, list the relevant values instead of guessing one.
-Return the actual value and a short explanation when useful.
 If the answer is absent, say exactly: I could not find this information in the document.
 
 CONTEXT:
@@ -117,7 +230,6 @@ ANSWER:"""
 
 
 def summarize_document(chunks, tokenizer, llm_model):
-    # Map step: summarize representative chunks separately so the tokenizer does not cut off one huge context.
     if len(chunks) <= 6:
         selected = chunks
     else:
@@ -202,10 +314,8 @@ if question:
                 answer, context = summarize_document(chunks, tokenizer, llm_model)
                 label = "Show summary notes"
             else:
-                selected = retrieve_top_chunks(
-                    question, chunks, chunk_embeddings, embedding_model, top_k=3
-                )
-                answer, context = answer_question(question, selected, tokenizer, llm_model)
+                selected = retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top_k=3)
+                answer, context = answer_question(question, selected, pages, tokenizer, llm_model)
                 label = "Show top retrieved source context"
 
         st.write(answer)
