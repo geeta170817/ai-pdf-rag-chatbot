@@ -60,28 +60,55 @@ def retrieve_best_chunk(question, chunks, chunk_embeddings, embedding_model):
 
 
 def is_summary_question(question):
+    """Detect common ways users ask for a document overview or summary."""
     q = question.lower().strip()
-    summary_phrases = [
-        "what is this pdf about",
-        "what is the pdf about",
-        "what is this document about",
-        "what is the document about",
-        "this pdf is about what",
-        "pdf is about what",
-        "summarize this pdf",
-        "summarise this pdf",
-        "summarize the pdf",
-        "summarise the pdf",
-        "summarize this document",
-        "summarise this document",
-        "summary of this pdf",
-        "summary of the pdf",
-        "give me a summary",
-        "give me an overview",
-        "overview of this pdf",
-        "overview of the document"
+
+    # Strong summary words can stand on their own.
+    summary_words = [
+        "summarize", "summarise", "summary", "overview"
     ]
-    return any(phrase in q for phrase in summary_phrases)
+    if any(word in q for word in summary_words):
+        return True
+
+    document_words = [
+        "pdf", "document", "file", "report", "article"
+    ]
+    has_document_word = any(word in q for word in document_words)
+
+    # General requests such as "tell me about this file" or
+    # "explain this document" should use the summary path.
+    overview_patterns = [
+        "what is this",
+        "what is the",
+        "is about what",
+        "about this",
+        "about the",
+        "tell me about",
+        "explain this",
+        "explain the",
+        "describe this",
+        "describe the",
+        "what does this contain",
+        "what does the contain",
+        "what does this cover",
+        "what does the cover"
+    ]
+
+    if has_document_word and any(pattern in q for pattern in overview_patterns):
+        return True
+
+    # Short follow-up requests after a PDF has already been uploaded.
+    short_summary_requests = [
+        "tell me about it",
+        "explain it",
+        "describe it",
+        "what is it about",
+        "what is this about"
+    ]
+    if any(phrase in q for phrase in short_summary_requests):
+        return True
+
+    return False
 
 
 def build_summary_context(chunks, max_chunks=4):
@@ -102,12 +129,13 @@ def generate_answer(question, context, tokenizer, llm_model, summary_mode=False)
     if summary_mode:
         prompt = f"""
 Read the document excerpts below and explain what the document is mainly about.
-Give a concise summary covering the main topics. Do not invent information.
+Write 2 to 4 clear sentences covering the main subject and important topics.
+Use only information from the excerpts. Do not invent information.
 
 Document excerpts:
 {context}
 
-Summary:
+Document overview:
 """
         max_tokens = 120
     else:
