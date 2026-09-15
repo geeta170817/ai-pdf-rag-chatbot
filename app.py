@@ -20,7 +20,6 @@ def load_llm():
 
 
 def clean_pdf_text(text):
-    """Clean extracted PDF text without removing useful line structure."""
     text = text.replace("\u00a0", " ")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
@@ -32,8 +31,6 @@ def extract_pages(uploaded_file):
     reader = PdfReader(uploaded_file)
     pages = []
     for number, page in enumerate(reader.pages, start=1):
-        # Layout mode preserves table/label relationships better than plain
-        # extraction. Fall back to normal extraction for older pypdf versions.
         try:
             text = page.extract_text(extraction_mode="layout") or ""
         except (TypeError, ValueError):
@@ -100,8 +97,7 @@ def compact_text(text):
 
 
 def clean_value(value):
-    value = re.sub(r"\s+", " ", value).strip(" :-\t")
-    return value
+    return re.sub(r"\s+", " ", value).strip(" :-\t")
 
 
 def extract_with_patterns(text, patterns):
@@ -118,7 +114,6 @@ def extract_exact_field(question, pages):
     q = question.lower().strip()
     text = "\n".join(p["text"] for p in pages)
     compact = compact_text(text)
-
     field_aliases = [
         ("service_mode", ["service mode"]),
         ("booking_number", ["booking number", "booking no", "booking id"]),
@@ -135,7 +130,6 @@ def extract_exact_field(question, pages):
         ("vessel", ["vessel", "ship name"]),
         ("container", ["container number", "container no", "container"])
     ]
-
     requested = None
     for field, aliases in field_aliases:
         if any(alias in q for alias in aliases):
@@ -143,7 +137,6 @@ def extract_exact_field(question, pages):
             break
     if requested is None:
         return None
-
     patterns = {
         "service_mode": [r"Service\s*Mode\s*:\s*(CY\s*/\s*CY|CFS\s*/\s*CFS|CY\s*/\s*CFS|CFS\s*/\s*CY)"],
         "booking_number": [r"Booking\s*No\s*\.?\s*:\s*([A-Za-z0-9\-/]+)"],
@@ -160,7 +153,6 @@ def extract_exact_field(question, pages):
         "vessel": [r"Vessel\s*(?:Name)?\s*:\s*([^\n]{2,120})"],
         "container": [r"Container\s*(?:No\.?|Number)?\s*:\s*([A-Z]{4}\s*\d{6,7}|[A-Za-z0-9\-/]+)"]
     }
-
     value = extract_with_patterns(text, patterns.get(requested, []))
     if value and requested == "service_mode":
         code = re.search(r"\b(CY|CFS)\s*/\s*(CY|CFS)\b", value, flags=re.IGNORECASE)
@@ -168,7 +160,6 @@ def extract_exact_field(question, pages):
             return f"{code.group(1).upper()}/{code.group(2).upper()}"
     if value:
         return value
-
     if requested == "service_mode":
         m = re.search(r"servicemode:(cy/cy|cfs/cfs|cy/cfs|cfs/cy)", compact)
         if m:
@@ -189,8 +180,7 @@ def extract_eta_answer(question, pages):
     if not dates:
         return None
     if any(word in q for word in ["final", "destination", "auckland"]):
-        unique_dates = sorted(set(dates))
-        return f"The final ETA shown in the document is {unique_dates[-1]}."
+        return f"The final ETA shown in the document is {sorted(set(dates))[-1]}."
     return None
 
 
@@ -222,41 +212,77 @@ ANSWER:"""
     return run_llm(prompt, tokenizer, llm_model, 100), context
 
 
-def summarize_document(chunks, tokenizer, llm_model):
-    if len(chunks) <= 6:
-        selected = chunks
-    else:
-        indices = sorted(set(round(i * (len(chunks) - 1) / 5) for i in range(6)))
-        selected = [chunks[i] for i in indices]
-    mini_summaries = []
-    for item in selected:
-        prompt = f"""Extract the main useful facts from this PDF excerpt in one short sentence.
-Ignore boilerplate/legal wording unless it is the main subject.
-Use only the excerpt.
+def remove_summary_noise(text):
+    """Remove repeated web/footer/legal noise before document summarization."""
+    kept = []
+    seen = set()
+    noise_terms = [
+        "maerskline.com", "maersk.com", "terms and conditions", "sanctions laws",
+        "all rights reserved", "http://", "https://", "www."
+    ]
+    for raw_line in text.splitlines():
+        line = clean_value(raw_line)
+        if not line or len(line) < 3:
+            continue
+        low = line.lower()
+        if any(term in low for term in noise_terms):
+            continue
+        normalized = re.sub(r"[^a-z0-9]+", " ", low).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        kept.append(line)
+    return "\n".join(kept)
 
-Page {item['page']} excerpt:
-{item['text']}
 
-Main facts:"""
-        mini = run_llm(prompt, tokenizer, llm_model, 55)
-        if mini:
-            mini_summaries.append(f"Page {item['page']}: {mini}")
-    combined = "\n".join(mini_summaries)
-    final_prompt = f"""Using the notes below, explain what the PDF is mainly about in 2 to 4 clear sentences.
-Mention the document type, main purpose, and important details when available.
-Do not invent information.
+def build_business_summary_facts(pages):
+    """Pull reliable high-value facts first, then add cleaned document excerpts."""
+    facts = []
+    field_questions = [
+        ("Document booking number", "what is the booking number"),
+        ("Origin", "what is the origin"),
+        ("Destination", "what is the destination"),
+        ("Service mode", "what is the service mode"),
+        ("Commodity", "what is the commodity"),
+        ("Booked by", "who booked")
+    ]
+    for label, question in field_questions:
+        value = extract_exact_field(question, pages)
+        if value:
+            facts.append(f"{label}: {value}")
 
-NOTES:
-{combined}
+    all_text = "\n".join(p["text"] for p in pages)
+    dates = sorted(set(re.findall(r"20\d{2}-\d{2}-\d{2}", all_text)))
+    if dates:
+        facts.append(f"Dates appearing in document: {', '.join(dates[:8])}")
+
+    first_page = pages[0]["text"] if pages else ""
+    cleaned_first_page = remove_summary_noise(first_page)
+    if cleaned_first_page:
+        facts.append("Important first-page content:\n" + cleaned_first_page[:2200])
+
+    return "\n".join(facts)
+
+
+def summarize_document(pages, tokenizer, llm_model):
+    summary_context = build_business_summary_facts(pages)
+    prompt = f"""Explain what this PDF is mainly about using ONLY the reliable facts below.
+Write 2 to 4 clear sentences for a normal user.
+Start by identifying the document type or business purpose if visible.
+Then mention the most important parties, origin/destination, cargo, booking or schedule details that are available.
+Ignore website names, repeated headers/footers, legal boilerplate and sanctions text.
+Do not repeat phrases. Do not invent missing information.
+
+RELIABLE DOCUMENT FACTS:
+{summary_context}
 
 DOCUMENT SUMMARY:"""
-    answer = run_llm(final_prompt, tokenizer, llm_model, 120)
-    return answer, combined
+    answer = run_llm(prompt, tokenizer, llm_model, 120)
+    return answer, summary_context
 
 
 embedding_model = load_embedding_model()
 tokenizer, llm_model = load_llm()
-
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "pdf_name" not in st.session_state:
@@ -266,7 +292,6 @@ uploaded_file = st.file_uploader("Upload a PDF document", type=["pdf"])
 if uploaded_file is None:
     st.info("Upload a PDF to start chatting with the document.")
     st.stop()
-
 if st.session_state.pdf_name != uploaded_file.name:
     st.session_state.messages = []
     st.session_state.pdf_name = uploaded_file.name
@@ -275,12 +300,10 @@ pages = extract_pages(uploaded_file)
 if not pages:
     st.error("No readable text could be extracted. This app currently supports text-based PDFs, not scanned/image-only PDFs.")
     st.stop()
-
 chunks = create_chunks(pages)
 chunk_texts = [c["text"] for c in chunks]
 with st.spinner("Preparing document search..."):
     chunk_embeddings = embedding_model.encode(chunk_texts)
-
 st.success(f"PDF ready. {len(pages)} pages and {len(chunks)} searchable chunks prepared.")
 
 for message in st.session_state.messages:
@@ -298,8 +321,8 @@ if question:
     with st.chat_message("assistant"):
         with st.spinner("Reading the document and preparing the answer..."):
             if is_summary_question(question):
-                answer, context = summarize_document(chunks, tokenizer, llm_model)
-                label = "Show summary notes"
+                answer, context = summarize_document(pages, tokenizer, llm_model)
+                label = "Show cleaned facts used for summary"
             else:
                 selected = retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top_k=3)
                 answer, context = answer_question(question, selected, pages, tokenizer, llm_model)
