@@ -4,6 +4,14 @@ A beginner-friendly Retrieval-Augmented Generation (RAG) application built with 
 
 The app allows a user to upload a PDF document, ask natural-language questions, retrieve the most relevant section of the document using semantic similarity, and generate a short answer with a local language model.
 
+## 🚀 Live Demo
+
+Try the deployed application here:
+
+**[Open AI PDF RAG Chatbot](https://ai-pdf-rag-chatbot-bfe6fmjoegbh9k6muiti9f.streamlit.app/)**
+
+Upload a text-based PDF and ask questions about its content.
+
 ## Features
 
 - Upload a PDF document
@@ -52,9 +60,7 @@ PDF_RAG_Chatbot/
 ├── app.py
 ├── requirements.txt
 ├── .gitignore
-├── README.md
-└── data/
-    └── practice_company_policy.pdf
+└── README.md
 ```
 
 ## Installation
@@ -75,12 +81,7 @@ Streamlit will open the application in your browser.
 
 ## Example Questions
 
-Using the included practice company policy PDF, try questions such as:
-
-- How many annual leave days do employees get?
-- How many sick leave days are available?
-- How many annual leave days can be carried forward?
-- What are the normal working hours?
+Upload a suitable text-based PDF and try questions about information contained in that document.
 
 ## Technologies Used
 
@@ -107,7 +108,6 @@ This project demonstrates the core concepts of a basic RAG application:
 
 ## Notes
 
-- The included company policy PDF is fictional and intended only for demonstration and practice.
 - The current version retrieves the single most relevant chunk.
 - For larger or production systems, a vector database such as FAISS, Chroma, Pinecone, pgvector, or Azure AI Search can be added.
 - Production systems should also include stronger document parsing, metadata, citations, security, monitoring, and evaluation.
@@ -124,4 +124,3 @@ Do not commit API keys, passwords, tokens, or `.env` files to GitHub. The `.giti
 - Add a vector database
 - Improve model quality
 - Add conversation-aware retrieval
-- Deploy the Streamlit app
