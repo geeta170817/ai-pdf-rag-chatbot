@@ -135,8 +135,28 @@ def extract_eta_answer(question, pages):
 
 
 def run_llm(prompt, client, max_new_tokens=200):
-    response = client.chat.completions.create(model=HF_MODEL, messages=[{"role":"system","content":"You answer questions from supplied document context. Be factual, concise, and never invent missing information."},{"role":"user","content":prompt}], max_tokens=max_new_tokens, temperature=0.1)
-    return response.choices[0].message.content.strip()
+    response = client.chat_completion(
+        model=HF_MODEL,
+        messages=[
+            {"role": "system", "content": "You answer questions from supplied document context. Return only the final answer, not internal reasoning. Be factual, concise, and never invent missing information."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=max_new_tokens,
+        temperature=0.1
+    )
+    message = response.choices[0].message
+    content = getattr(message, "content", None)
+    if isinstance(content, str) and content.strip():
+        return content.strip()
+    reasoning = getattr(message, "reasoning_content", None)
+    if isinstance(reasoning, str) and reasoning.strip():
+        # Some reasoning-model providers may return text in reasoning_content.
+        # Keep a concise tail rather than crashing when content is None.
+        cleaned = reasoning.strip()
+        if "final answer" in cleaned.lower():
+            cleaned = re.split(r"final answer\s*:?", cleaned, flags=re.IGNORECASE)[-1].strip()
+        return cleaned
+    raise RuntimeError("The hosted model returned an empty response. Please try again.")
 
 
 def answer_question(question, selected, pages, client):
@@ -146,7 +166,7 @@ def answer_question(question, selected, pages, client):
     eta_answer = extract_eta_answer(question, pages)
     if eta_answer: return eta_answer, context
     prompt = f"Answer the question using ONLY the context below. Read tables and label-value fields carefully. Copy exact names, codes, numbers and dates. If the answer is absent, say: I could not find this information in the document.\n\nCONTEXT:\n{context}\n\nQUESTION: {question}\nANSWER:"
-    return run_llm(prompt, client, 180), context
+    return run_llm(prompt, client, 300), context
 
 
 def remove_summary_noise(text):
@@ -176,8 +196,8 @@ def build_business_summary_facts(pages):
 
 def summarize_document(pages, client):
     summary_context=build_business_summary_facts(pages)
-    prompt=f"Explain what this PDF is mainly about using ONLY the reliable document facts below. Write 2 to 4 clear sentences. Identify the document type and business purpose when visible. Mention important booking/shipment information such as parties, origin, destination, cargo and schedule when available. Ignore website names, repeated headers/footers, legal boilerplate and sanctions wording. Do not invent information.\n\nRELIABLE DOCUMENT FACTS:\n{summary_context}\n\nDOCUMENT SUMMARY:"
-    return run_llm(prompt,client,220),summary_context
+    prompt=f"Explain what this PDF is mainly about using ONLY the reliable document facts below. Write 2 to 4 clear sentences. Identify the document type and business purpose when visible. Mention important booking/shipment information such as parties, origin, destination, cargo and schedule when available. Ignore website names, repeated headers/footers, legal boilerplate and sanctions wording. Do not invent information. Return only the summary.\n\nRELIABLE DOCUMENT FACTS:\n{summary_context}\n\nDOCUMENT SUMMARY:"
+    return run_llm(prompt,client,400),summary_context
 
 
 embedding_model=load_embedding_model()
