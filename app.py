@@ -3,20 +3,24 @@ import streamlit as st
 from pypdf import PdfReader
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
-from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from huggingface_hub import InferenceClient
 
 st.set_page_config(page_title="AI PDF Chatbot", page_icon="📄", layout="centered")
 st.title("AI PDF Chatbot")
 st.write("Upload a text-based PDF and ask questions about it.")
+
+HF_MODEL = "Qwen/Qwen2.5-7B-Instruct"
 
 @st.cache_resource
 def load_embedding_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 @st.cache_resource
-def load_llm():
-    name = "google/flan-t5-base"
-    return AutoTokenizer.from_pretrained(name), AutoModelForSeq2SeqLM.from_pretrained(name)
+def load_llm_client():
+    token = st.secrets.get("HF_TOKEN")
+    if not token:
+        raise RuntimeError("HF_TOKEN is missing from Streamlit Secrets.")
+    return InferenceClient(provider="auto", api_key=token)
 
 
 def clean_pdf_text(text):
@@ -184,13 +188,20 @@ def extract_eta_answer(question, pages):
     return None
 
 
-def run_llm(prompt, tokenizer, llm_model, max_new_tokens=80):
-    inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-    outputs = llm_model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, num_beams=2, early_stopping=True)
-    return tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
+def run_llm(prompt, client, max_new_tokens=200):
+    response = client.chat.completions.create(
+        model=HF_MODEL,
+        messages=[
+            {"role": "system", "content": "You answer questions from supplied document context. Be factual, concise, and never invent missing information."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=max_new_tokens,
+        temperature=0.1
+    )
+    return response.choices[0].message.content.strip()
 
 
-def answer_question(question, selected, pages, tokenizer, llm_model):
+def answer_question(question, selected, pages, client):
     context = format_context(selected)
     exact = extract_exact_field(question, pages)
     if exact:
@@ -209,16 +220,16 @@ CONTEXT:
 
 QUESTION: {question}
 ANSWER:"""
-    return run_llm(prompt, tokenizer, llm_model, 100), context
+    return run_llm(prompt, client, 180), context
 
 
 def remove_summary_noise(text):
-    """Remove repeated web/footer/legal noise before document summarization."""
     kept = []
     seen = set()
     noise_terms = [
         "maerskline.com", "maersk.com", "terms and conditions", "sanctions laws",
-        "all rights reserved", "http://", "https://", "www."
+        "all rights reserved", "http://", "https://", "www.",
+        "warrant and represent", "identified on any list", "sanctioned party"
     ]
     for raw_line in text.splitlines():
         line = clean_value(raw_line)
@@ -236,10 +247,9 @@ def remove_summary_noise(text):
 
 
 def build_business_summary_facts(pages):
-    """Pull reliable high-value facts first, then add cleaned document excerpts."""
     facts = []
     field_questions = [
-        ("Document booking number", "what is the booking number"),
+        ("Booking number", "what is the booking number"),
         ("Origin", "what is the origin"),
         ("Destination", "what is the destination"),
         ("Service mode", "what is the service mode"),
@@ -250,39 +260,40 @@ def build_business_summary_facts(pages):
         value = extract_exact_field(question, pages)
         if value:
             facts.append(f"{label}: {value}")
-
     all_text = "\n".join(p["text"] for p in pages)
     dates = sorted(set(re.findall(r"20\d{2}-\d{2}-\d{2}", all_text)))
     if dates:
         facts.append(f"Dates appearing in document: {', '.join(dates[:8])}")
-
     first_page = pages[0]["text"] if pages else ""
     cleaned_first_page = remove_summary_noise(first_page)
     if cleaned_first_page:
-        facts.append("Important first-page content:\n" + cleaned_first_page[:2200])
-
+        facts.append("Important first-page content:\n" + cleaned_first_page[:3000])
     return "\n".join(facts)
 
 
-def summarize_document(pages, tokenizer, llm_model):
+def summarize_document(pages, client):
     summary_context = build_business_summary_facts(pages)
-    prompt = f"""Explain what this PDF is mainly about using ONLY the reliable facts below.
-Write 2 to 4 clear sentences for a normal user.
-Start by identifying the document type or business purpose if visible.
-Then mention the most important parties, origin/destination, cargo, booking or schedule details that are available.
-Ignore website names, repeated headers/footers, legal boilerplate and sanctions text.
-Do not repeat phrases. Do not invent missing information.
+    prompt = f"""Explain what this PDF is mainly about using ONLY the reliable document facts below.
+Write 2 to 4 clear sentences.
+Identify the document type and business purpose when visible.
+Mention important booking/shipment information such as parties, origin, destination, cargo and schedule when available.
+Ignore website names, repeated headers/footers, legal boilerplate and sanctions wording.
+Do not invent information.
 
 RELIABLE DOCUMENT FACTS:
 {summary_context}
 
 DOCUMENT SUMMARY:"""
-    answer = run_llm(prompt, tokenizer, llm_model, 120)
-    return answer, summary_context
+    return run_llm(prompt, client, 220), summary_context
 
 
 embedding_model = load_embedding_model()
-tokenizer, llm_model = load_llm()
+try:
+    llm_client = load_llm_client()
+except Exception as exc:
+    st.error(f"Could not initialize the hosted LLM: {exc}")
+    st.stop()
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "pdf_name" not in st.session_state:
@@ -319,15 +330,20 @@ if question:
     with st.chat_message("user"):
         st.write(question)
     with st.chat_message("assistant"):
-        with st.spinner("Reading the document and preparing the answer..."):
-            if is_summary_question(question):
-                answer, context = summarize_document(pages, tokenizer, llm_model)
-                label = "Show cleaned facts used for summary"
-            else:
-                selected = retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top_k=3)
-                answer, context = answer_question(question, selected, pages, tokenizer, llm_model)
-                label = "Show top retrieved source context"
-        st.write(answer)
-        with st.expander(label):
-            st.text(context)
-    st.session_state.messages.append({"role": "assistant", "content": answer, "context": context, "context_label": label})
+        try:
+            with st.spinner("Reading the document and preparing the answer..."):
+                if is_summary_question(question):
+                    answer, context = summarize_document(pages, llm_client)
+                    label = "Show cleaned facts used for summary"
+                else:
+                    selected = retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top_k=3)
+                    answer, context = answer_question(question, selected, pages, llm_client)
+                    label = "Show top retrieved source context"
+            st.write(answer)
+            with st.expander(label):
+                st.text(context)
+            st.session_state.messages.append({"role": "assistant", "content": answer, "context": context, "context_label": label})
+        except Exception as exc:
+            error_text = str(exc)
+            st.error("The hosted AI model could not answer this request.")
+            st.caption(error_text)
