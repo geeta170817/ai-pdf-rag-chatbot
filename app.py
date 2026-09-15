@@ -55,18 +55,14 @@ def retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top
     q_embedding = embedding_model.encode(question)
     semantic = cosine_similarity([q_embedding], chunk_embeddings)[0]
     q_words = keywords(question)
-
     scored = []
     for i, chunk in enumerate(chunks):
         text_lower = chunk["text"].lower()
         keyword_hits = sum(1 for word in q_words if word in text_lower)
-        phrase_bonus = 0.0
         important_phrase = " ".join(q_words)
-        if important_phrase and important_phrase in text_lower:
-            phrase_bonus = 1.0
+        phrase_bonus = 1.0 if important_phrase and important_phrase in text_lower else 0.0
         score = float(semantic[i]) + (0.35 * keyword_hits) + phrase_bonus
         scored.append((score, i))
-
     best = sorted(scored, reverse=True)[:top_k]
     return [chunks[i] for _, i in best]
 
@@ -86,84 +82,140 @@ def is_summary_question(question):
     return q in ["what is it about", "tell me about it", "explain it", "describe it", "what is this about"]
 
 
-def normalize_for_matching(text):
-    # PDF table extraction can split words across spaces/newlines. This keeps
-    # ordinary spaces but also creates a compact version for robust matching.
-    normal = re.sub(r"\s+", " ", text).strip()
-    compact = re.sub(r"\s+", "", text).lower()
-    return normal, compact
+def compact_text(text):
+    return re.sub(r"\s+", "", text).lower()
+
+
+def clean_value(value):
+    value = re.sub(r"\s+", " ", value).strip(" :-\t")
+    return value
+
+
+def extract_with_patterns(text, patterns):
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = clean_value(match.group(1))
+            if value:
+                return value
+    return None
 
 
 def extract_exact_field(question, pages):
-    """Extract common label/value fields directly before asking the LLM."""
-    q = question.lower()
-    all_text = "\n".join(p["text"] for p in pages)
-    normal, compact = normalize_for_matching(all_text)
+    """Deterministically answer common business-document label/value questions."""
+    q = question.lower().strip()
+    text = "\n".join(p["text"] for p in pages)
+    compact = compact_text(text)
 
-    # Field aliases. Add more business fields here as the project grows.
-    aliases = {
-        "service mode": ["service mode", "service-mode"],
-        "booking number": ["booking number", "booking no", "booking no."],
-        "booking no": ["booking number", "booking no", "booking no."],
-        "commodity": ["commodity description", "commodity"],
-        "price calculation date": ["price calculation date"],
-        "merchant haulage release reference": ["merchant haulage release reference"]
-    }
+    # Identify the user's intended field using natural aliases.
+    field_aliases = [
+        ("service_mode", ["service mode"]),
+        ("booking_number", ["booking number", "booking no", "booking id"]),
+        ("destination", ["destination", "where is it going", "where is the shipment going", "ship to"]),
+        ("origin", ["origin", "where is it from", "shipment from", "ship from"]),
+        ("commodity", ["commodity", "cargo description", "commodity description", "what is being shipped", "what cargo"]),
+        ("booked_by", ["booked by party", "booked by", "who booked"]),
+        ("business_unit", ["business unit"]),
+        ("price_owner", ["price owner"]),
+        ("service_contract", ["service contract"]),
+        ("print_date", ["print date"]),
+        ("price_calculation_date", ["price calculation date"]),
+        ("merchant_release", ["merchant haulage release reference", "release reference"]),
+        ("vessel", ["vessel", "ship name"]),
+        ("container", ["container number", "container no", "container"])
+    ]
 
     requested = None
-    for canonical, names in aliases.items():
-        if any(name in q for name in names):
-            requested = canonical
+    for field, aliases in field_aliases:
+        if any(alias in q for alias in aliases):
+            requested = field
             break
-
     if requested is None:
         return None
 
-    # Special patterns handle fields commonly found in booking confirmations.
     patterns = {
-        "service mode": [
-            r"Service\s*Mode\s*:\s*([^\n]{1,40})",
-            r"Service\s*Mode\s*[:\-]?\s*(CY\s*/\s*CY|CFS\s*/\s*CFS|CY\s*/\s*CFS|CFS\s*/\s*CY)"
+        "service_mode": [
+            r"Service\s*Mode\s*:\s*(CY\s*/\s*CY|CFS\s*/\s*CFS|CY\s*/\s*CFS|CFS\s*/\s*CY)",
+            r"Service\s*Mode\s*:\s*([^\n]{1,30})"
         ],
-        "booking number": [
+        "booking_number": [
             r"Booking\s*No\s*\.?\s*:\s*([A-Za-z0-9\-/]+)"
         ],
-        "booking no": [
-            r"Booking\s*No\s*\.?\s*:\s*([A-Za-z0-9\-/]+)"
+        "destination": [
+            r"\bTo\s*:\s*([^\n]{2,120})",
+            r"Destination\s*:\s*([^\n]{2,120})"
+        ],
+        "origin": [
+            r"\bFrom\s*:\s*([^\n]{2,120})",
+            r"Origin\s*:\s*([^\n]{2,120})"
         ],
         "commodity": [
-            r"Commodity\s*Description\s*:\s*([^\n]{1,120})"
+            r"Commodity\s*Description\s*:\s*([^\n]{2,160})",
+            r"Customer\s*Cargo\s*:\s*([^\n]{2,160})"
         ],
-        "price calculation date": [
+        "booked_by": [
+            r"Booked\s*by\s*Party\s*:\s*([^\n]{2,120})"
+        ],
+        "business_unit": [
+            r"Business\s*Unit\s*:\s*([^\n]{2,120})"
+        ],
+        "price_owner": [
+            r"Price\s*Owner\s*:\s*([^\n]{2,120})"
+        ],
+        "service_contract": [
+            r"Service\s*Contract\s*:\s*([^\n]{2,120})"
+        ],
+        "print_date": [
+            r"Print\s*Date\s*:\s*([^\n]{2,60})"
+        ],
+        "price_calculation_date": [
             r"Price\s*Calculation\s*Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})"
         ],
-        "merchant haulage release reference": [
-            r"Merchant\s*Haulage\s*Release\s*Reference\s*:\s*([^\n]{1,120})"
+        "merchant_release": [
+            r"Merchant\s*Haulage\s*Release\s*Reference\s*:\s*([^\n]{2,160})"
+        ],
+        "vessel": [
+            r"Vessel\s*(?:Name)?\s*:\s*([^\n]{2,120})"
+        ],
+        "container": [
+            r"Container\s*(?:No\.?|Number)?\s*:\s*([A-Z]{4}\s*\d{6,7}|[A-Za-z0-9\-/]+)"
         ]
     }
 
-    for pattern in patterns.get(requested, []):
-        match = re.search(pattern, all_text, flags=re.IGNORECASE)
-        if match:
-            value = re.sub(r"\s+", " ", match.group(1)).strip(" :-")
-            # Service Mode extraction can accidentally capture following labels;
-            # prefer the standard CY/CFS code when present.
-            if requested == "service mode":
-                code = re.search(r"\b(CY|CFS)\s*/\s*(CY|CFS)\b", value, flags=re.IGNORECASE)
-                if code:
-                    value = f"{code.group(1).upper()}/{code.group(2).upper()}"
-            if value:
-                return value
+    value = extract_with_patterns(text, patterns.get(requested, []))
 
-    # Compact fallback specifically handles badly split PDF text such as
-    # "B ooking No .:" or labels broken across lines.
-    if requested == "service mode":
+    # Fix standard service-mode formatting.
+    if value and requested == "service_mode":
+        code = re.search(r"\b(CY|CFS)\s*/\s*(CY|CFS)\b", value, flags=re.IGNORECASE)
+        if code:
+            return f"{code.group(1).upper()}/{code.group(2).upper()}"
+
+    if value:
+        return value
+
+    # Compact fallbacks handle PDF extraction that breaks labels into letters.
+    if requested == "service_mode":
         m = re.search(r"servicemode:(cy/cy|cfs/cfs|cy/cfs|cfs/cy)", compact)
         if m:
             return m.group(1).upper()
 
-    if requested in ["booking number", "booking no"]:
+    if requested == "booking_number":
         m = re.search(r"bookingno\.?[:]?([0-9]{5,})", compact)
+        if m:
+            return m.group(1)
+
+    # Destination/origin are particularly useful in logistics PDFs. Search
+    # compact text between nearby known labels when normal line extraction fails.
+    if requested == "destination":
+        m = re.search(r"to:(.{3,100}?)(?:customercargo:|servicecontract:|priceowner:|businessunit:)", compact)
+        if m:
+            raw = m.group(1)
+            # Compact fallback cannot reliably restore spaces, so only use it
+            # when normal extraction failed and show the extracted raw value.
+            return raw
+
+    if requested == "origin":
+        m = re.search(r"from:(.{3,100}?)(?:contactname:|bookedbyref|to:)", compact)
         if m:
             return m.group(1)
 
@@ -174,47 +226,30 @@ def extract_eta_answer(question, pages):
     q = question.lower()
     if "eta" not in q and "arrival" not in q:
         return None
-
     text = "\n".join(p["text"] for p in pages)
     dates = re.findall(r"20\d{2}-\d{2}-\d{2}", text)
     if not dates:
         return None
-
-    # For final/destination ETA questions, use the last chronological date
-    # appearing in the transport plan/document as a deterministic fallback.
     if any(word in q for word in ["final", "destination", "auckland"]):
         unique_dates = sorted(set(dates))
         return f"The final ETA shown in the document is {unique_dates[-1]}."
-
     return None
 
 
 def run_llm(prompt, tokenizer, llm_model, max_new_tokens=80):
     inputs = tokenizer(prompt, return_tensors="pt", truncation=True, max_length=512)
-    outputs = llm_model.generate(
-        **inputs,
-        max_new_tokens=max_new_tokens,
-        do_sample=False,
-        num_beams=2,
-        early_stopping=True
-    )
+    outputs = llm_model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False, num_beams=2, early_stopping=True)
     return tokenizer.decode(outputs[0], skip_special_tokens=True).strip()
 
 
 def answer_question(question, selected, pages, tokenizer, llm_model):
     context = format_context(selected)
-
-    # 1) Exact extraction first for clear business fields.
     exact = extract_exact_field(question, pages)
     if exact:
         return exact, context
-
-    # 2) Deterministic handling for common ETA/destination questions.
     eta_answer = extract_eta_answer(question, pages)
     if eta_answer:
         return eta_answer, context
-
-    # 3) LLM fallback for natural-language questions and reasoning.
     prompt = f"""Answer the question using ONLY the context below.
 Read tables and label-value fields carefully.
 Copy exact names, codes, numbers and dates from the context when answering factual questions.
@@ -235,7 +270,6 @@ def summarize_document(chunks, tokenizer, llm_model):
     else:
         indices = sorted(set(round(i * (len(chunks) - 1) / 5) for i in range(6)))
         selected = [chunks[i] for i in indices]
-
     mini_summaries = []
     for item in selected:
         prompt = f"""Extract the main useful facts from this PDF excerpt in one short sentence.
@@ -249,7 +283,6 @@ Main facts:"""
         mini = run_llm(prompt, tokenizer, llm_model, 55)
         if mini:
             mini_summaries.append(f"Page {item['page']}: {mini}")
-
     combined = "\n".join(mini_summaries)
     final_prompt = f"""Using the notes below, explain what the PDF is mainly about in 2 to 4 clear sentences.
 Mention the document type, main purpose, and important details when available.
@@ -272,7 +305,6 @@ if "pdf_name" not in st.session_state:
     st.session_state.pdf_name = None
 
 uploaded_file = st.file_uploader("Upload a PDF document", type=["pdf"])
-
 if uploaded_file is None:
     st.info("Upload a PDF to start chatting with the document.")
     st.stop()
@@ -288,7 +320,6 @@ if not pages:
 
 chunks = create_chunks(pages)
 chunk_texts = [c["text"] for c in chunks]
-
 with st.spinner("Preparing document search..."):
     chunk_embeddings = embedding_model.encode(chunk_texts)
 
@@ -302,12 +333,10 @@ for message in st.session_state.messages:
                 st.text(message["context"])
 
 question = st.chat_input("Ask a question about the PDF")
-
 if question:
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.write(question)
-
     with st.chat_message("assistant"):
         with st.spinner("Reading the document and preparing the answer..."):
             if is_summary_question(question):
@@ -317,14 +346,7 @@ if question:
                 selected = retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top_k=3)
                 answer, context = answer_question(question, selected, pages, tokenizer, llm_model)
                 label = "Show top retrieved source context"
-
         st.write(answer)
         with st.expander(label):
             st.text(context)
-
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": answer,
-        "context": context,
-        "context_label": label
-    })
+    st.session_state.messages.append({"role": "assistant", "content": answer, "context": context, "context_label": label})
