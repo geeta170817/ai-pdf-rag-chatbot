@@ -19,13 +19,26 @@ def load_llm():
     return AutoTokenizer.from_pretrained(name), AutoModelForSeq2SeqLM.from_pretrained(name)
 
 
+def clean_pdf_text(text):
+    """Clean extracted PDF text without removing useful line structure."""
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def extract_pages(uploaded_file):
     reader = PdfReader(uploaded_file)
     pages = []
     for number, page in enumerate(reader.pages, start=1):
-        text = page.extract_text() or ""
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n{3,}", "\n\n", text).strip()
+        # Layout mode preserves table/label relationships better than plain
+        # extraction. Fall back to normal extraction for older pypdf versions.
+        try:
+            text = page.extract_text(extraction_mode="layout") or ""
+        except (TypeError, ValueError):
+            text = page.extract_text() or ""
+        text = clean_pdf_text(text)
         if text:
             pages.append({"page": number, "text": text})
     return pages
@@ -102,12 +115,10 @@ def extract_with_patterns(text, patterns):
 
 
 def extract_exact_field(question, pages):
-    """Deterministically answer common business-document label/value questions."""
     q = question.lower().strip()
     text = "\n".join(p["text"] for p in pages)
     compact = compact_text(text)
 
-    # Identify the user's intended field using natural aliases.
     field_aliases = [
         ("service_mode", ["service mode"]),
         ("booking_number", ["booking number", "booking no", "booking id"]),
@@ -134,91 +145,38 @@ def extract_exact_field(question, pages):
         return None
 
     patterns = {
-        "service_mode": [
-            r"Service\s*Mode\s*:\s*(CY\s*/\s*CY|CFS\s*/\s*CFS|CY\s*/\s*CFS|CFS\s*/\s*CY)",
-            r"Service\s*Mode\s*:\s*([^\n]{1,30})"
-        ],
-        "booking_number": [
-            r"Booking\s*No\s*\.?\s*:\s*([A-Za-z0-9\-/]+)"
-        ],
-        "destination": [
-            r"\bTo\s*:\s*([^\n]{2,120})",
-            r"Destination\s*:\s*([^\n]{2,120})"
-        ],
-        "origin": [
-            r"\bFrom\s*:\s*([^\n]{2,120})",
-            r"Origin\s*:\s*([^\n]{2,120})"
-        ],
-        "commodity": [
-            r"Commodity\s*Description\s*:\s*([^\n]{2,160})",
-            r"Customer\s*Cargo\s*:\s*([^\n]{2,160})"
-        ],
-        "booked_by": [
-            r"Booked\s*by\s*Party\s*:\s*([^\n]{2,120})"
-        ],
-        "business_unit": [
-            r"Business\s*Unit\s*:\s*([^\n]{2,120})"
-        ],
-        "price_owner": [
-            r"Price\s*Owner\s*:\s*([^\n]{2,120})"
-        ],
-        "service_contract": [
-            r"Service\s*Contract\s*:\s*([^\n]{2,120})"
-        ],
-        "print_date": [
-            r"Print\s*Date\s*:\s*([^\n]{2,60})"
-        ],
-        "price_calculation_date": [
-            r"Price\s*Calculation\s*Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})"
-        ],
-        "merchant_release": [
-            r"Merchant\s*Haulage\s*Release\s*Reference\s*:\s*([^\n]{2,160})"
-        ],
-        "vessel": [
-            r"Vessel\s*(?:Name)?\s*:\s*([^\n]{2,120})"
-        ],
-        "container": [
-            r"Container\s*(?:No\.?|Number)?\s*:\s*([A-Z]{4}\s*\d{6,7}|[A-Za-z0-9\-/]+)"
-        ]
+        "service_mode": [r"Service\s*Mode\s*:\s*(CY\s*/\s*CY|CFS\s*/\s*CFS|CY\s*/\s*CFS|CFS\s*/\s*CY)"],
+        "booking_number": [r"Booking\s*No\s*\.?\s*:\s*([A-Za-z0-9\-/]+)"],
+        "destination": [r"\bTo\s*:\s*([^\n]{2,120})", r"Destination\s*:\s*([^\n]{2,120})"],
+        "origin": [r"\bFrom\s*:\s*([^\n]{2,120})", r"Origin\s*:\s*([^\n]{2,120})"],
+        "commodity": [r"Commodity\s*Description\s*:\s*([^\n]{2,160})", r"Customer\s*Cargo\s*:\s*([^\n]{2,160})"],
+        "booked_by": [r"Booked\s*by\s*Party\s*:\s*([^\n]{2,120})"],
+        "business_unit": [r"Business\s*Unit\s*:\s*([^\n]{2,120})"],
+        "price_owner": [r"Price\s*Owner\s*:\s*([^\n]{2,120})"],
+        "service_contract": [r"Service\s*Contract\s*:\s*([^\n]{2,120})"],
+        "print_date": [r"Print\s*Date\s*:\s*([^\n]{2,60})"],
+        "price_calculation_date": [r"Price\s*Calculation\s*Date\s*:\s*([0-9]{4}-[0-9]{2}-[0-9]{2})"],
+        "merchant_release": [r"Merchant\s*Haulage\s*Release\s*Reference\s*:\s*([^\n]{2,160})"],
+        "vessel": [r"Vessel\s*(?:Name)?\s*:\s*([^\n]{2,120})"],
+        "container": [r"Container\s*(?:No\.?|Number)?\s*:\s*([A-Z]{4}\s*\d{6,7}|[A-Za-z0-9\-/]+)"]
     }
 
     value = extract_with_patterns(text, patterns.get(requested, []))
-
-    # Fix standard service-mode formatting.
     if value and requested == "service_mode":
         code = re.search(r"\b(CY|CFS)\s*/\s*(CY|CFS)\b", value, flags=re.IGNORECASE)
         if code:
             return f"{code.group(1).upper()}/{code.group(2).upper()}"
-
     if value:
         return value
 
-    # Compact fallbacks handle PDF extraction that breaks labels into letters.
     if requested == "service_mode":
         m = re.search(r"servicemode:(cy/cy|cfs/cfs|cy/cfs|cfs/cy)", compact)
         if m:
             return m.group(1).upper()
-
     if requested == "booking_number":
         m = re.search(r"bookingno\.?[:]?([0-9]{5,})", compact)
         if m:
             return m.group(1)
-
-    # Destination/origin are particularly useful in logistics PDFs. Search
-    # compact text between nearby known labels when normal line extraction fails.
-    if requested == "destination":
-        m = re.search(r"to:(.{3,100}?)(?:customercargo:|servicecontract:|priceowner:|businessunit:)", compact)
-        if m:
-            raw = m.group(1)
-            # Compact fallback cannot reliably restore spaces, so only use it
-            # when normal extraction failed and show the extracted raw value.
-            return raw
-
-    if requested == "origin":
-        m = re.search(r"from:(.{3,100}?)(?:contactname:|bookedbyref|to:)", compact)
-        if m:
-            return m.group(1)
-
     return None
 
 
