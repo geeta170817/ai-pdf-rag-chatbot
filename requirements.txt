@@ -2,6 +2,5 @@ streamlit
 pypdf
 sentence-transformers
 scikit-learn
-transformers
 torch
-sentencepiece
+huggingface_hub
