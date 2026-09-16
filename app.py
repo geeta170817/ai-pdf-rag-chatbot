@@ -385,6 +385,26 @@ with col2:
 with col3:
     st.metric("Searchable chunks", len(chunks))
 st.divider()
+if st.button("📑 Summarize Document"):
+    try:
+        with st.spinner("📑 Reading the document and preparing a summary..."):
+            summary, summary_context = summarize_document(
+                pages,
+                llm_client
+            )
+
+        st.subheader("📑 Document Summary")
+        st.write(summary)
+
+        with st.expander("🔍 View facts used for summary"):
+            st.text(summary_context)
+
+    except Exception as exc:
+        st.error("Could not summarize the document.")
+        st.caption(str(exc))
+
+st.divider()
+
 st.subheader("💬 Chat with your document")
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
