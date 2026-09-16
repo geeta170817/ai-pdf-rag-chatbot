@@ -158,16 +158,32 @@ def run_llm(prompt, client, max_new_tokens=200):
         return cleaned
     raise RuntimeError("The hosted model returned an empty response. Please try again.")
 
-
 def answer_question(question, selected, pages, client):
     context = format_context(selected)
-    exact = extract_exact_field(question, pages)
-    if exact: return exact, context
-    eta_answer = extract_eta_answer(question, pages)
-    if eta_answer: return eta_answer, context
-    prompt = f"Answer the question using ONLY the context below. Read tables and label-value fields carefully. Copy exact names, codes, numbers and dates. If the answer is absent, say: I could not find this information in the document.\n\nCONTEXT:\n{context}\n\nQUESTION: {question}\nANSWER:"
-    return run_llm(prompt, client, 300), context
 
+    prompt = f"""
+Answer the question using ONLY the PDF context below.
+
+Rules:
+1. Find the exact information requested by the user.
+2. Read labels, values, tables, numbers and dates carefully.
+3. Do not guess.
+4. Do not answer with a nearby label or heading.
+5. For numbers, IDs, booking numbers, dates and codes, copy the exact value.
+6. If the information is not present in the context, say:
+   I could not find this information in the document.
+
+PDF CONTEXT:
+{context}
+
+USER QUESTION:
+{question}
+
+FINAL ANSWER:
+"""
+
+    answer = run_llm(prompt, client, 300)
+    return answer, context
 
 def remove_summary_noise(text):
     kept=[]; seen=set(); noise_terms=["maerskline.com","maersk.com","terms and conditions","sanctions laws","all rights reserved","http://","https://","www.","warrant and represent","identified on any list","sanctioned party"]
