@@ -138,26 +138,59 @@ def run_llm(prompt, client, max_new_tokens=200):
     response = client.chat_completion(
         model=HF_MODEL,
         messages=[
-            {"role": "system", "content": "You answer questions from supplied document context. Return only the final answer, not internal reasoning. Be factual, concise, and never invent missing information."},
+            {
+                "role": "system",
+                "content": (
+                    "Answer questions using only the supplied document context. "
+                    "Return ONLY the final answer. "
+                    "Do not show reasoning, analysis, thinking, or explanation. "
+                    "Be factual and concise. "
+                    "Never invent information."
+                )
+            },
             {"role": "user", "content": prompt}
         ],
         max_tokens=max_new_tokens,
         temperature=0.1
     )
-    message = response.choices[0].message
-    content = getattr(message, "content", None)
-    if isinstance(content, str) and content.strip():
-        return content.strip()
-    reasoning = getattr(message, "reasoning_content", None)
-    if isinstance(reasoning, str) and reasoning.strip():
-        # Some reasoning-model providers may return text in reasoning_content.
-        # Keep a concise tail rather than crashing when content is None.
-        cleaned = reasoning.strip()
-        if "final answer" in cleaned.lower():
-            cleaned = re.split(r"final answer\s*:?", cleaned, flags=re.IGNORECASE)[-1].strip()
-        return cleaned
-    raise RuntimeError("The hosted model returned an empty response. Please try again.")
 
+    message = response.choices[0].message
+
+    content = getattr(message, "content", None)
+
+    if isinstance(content, str) and content.strip():
+        cleaned = content.strip()
+
+        # Remove Qwen thinking blocks if present
+        cleaned = re.sub(
+            r"<think>.*?</think>",
+            "",
+            cleaned,
+            flags=re.DOTALL | re.IGNORECASE
+        ).strip()
+
+        if cleaned:
+            return cleaned
+
+    reasoning = getattr(message, "reasoning_content", None)
+
+    if isinstance(reasoning, str) and reasoning.strip():
+        cleaned = reasoning.strip()
+
+        # If the provider puts the final answer inside reasoning_content,
+        # try to extract only the final answer.
+        match = re.search(
+            r"(?:final answer|answer)\s*[:\-]\s*(.+)$",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL
+        )
+
+        if match:
+            return match.group(1).strip()
+
+    raise RuntimeError(
+        "The hosted model did not return a final answer. Please try again."
+    )
 def answer_question(question, selected, pages, client):
     context = format_context(selected)
 
