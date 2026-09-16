@@ -5,9 +5,12 @@ from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_similarity
 from huggingface_hub import InferenceClient
 
-st.set_page_config(page_title="AI PDF Chatbot", page_icon="📄", layout="centered")
-st.title("AI PDF Chatbot")
-st.write("Upload a text-based PDF and ask questions about it.")
+st.set_page_config(page_title="AI Document Assistant", page_icon="📄", layout="wide")
+st.title("📄 AI Document Assistant")
+st.caption("Upload a text-based PDF and ask questions grounded in your document.")
+
+with st.expander("ℹ️ How it works"):
+    st.write("Your PDF is split into searchable chunks. The app retrieves the most relevant sections for your question and sends that document context to the AI model to prepare the answer.")
 
 HF_MODEL = "Qwen/Qwen3-8B"
 
@@ -352,9 +355,20 @@ except Exception as exc:
     st.error(f"Could not initialize the hosted LLM: {exc}"); st.stop()
 if "messages" not in st.session_state: st.session_state.messages=[]
 if "pdf_name" not in st.session_state: st.session_state.pdf_name=None
-uploaded_file=st.file_uploader("Upload a PDF document",type=["pdf"])
+with st.sidebar:
+    st.header("📁 Document")
+    uploaded_file = st.file_uploader("Upload a PDF document", type=["pdf"], help="Upload a text-based PDF. Scanned/image-only PDFs are not currently supported.")
+    if st.button("🧹 Clear Chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+    st.divider()
+    st.subheader("About")
+    st.caption("Answers are generated from the content retrieved from your uploaded PDF.")
+    st.caption("RAG • Sentence Transformers • Qwen")
+
 if uploaded_file is None:
-    st.info("Upload a PDF to start chatting with the document."); st.stop()
+    st.info("👈 Upload a PDF from the sidebar to start chatting with your document.")
+    st.stop()
 if st.session_state.pdf_name!=uploaded_file.name:
     st.session_state.messages=[]; st.session_state.pdf_name=uploaded_file.name
 pages=extract_pages(uploaded_file)
@@ -362,22 +376,31 @@ if not pages:
     st.error("No readable text could be extracted. This app currently supports text-based PDFs, not scanned/image-only PDFs."); st.stop()
 chunks=create_chunks(pages); chunk_texts=[c["text"] for c in chunks]
 with st.spinner("Preparing document search..."): chunk_embeddings=embedding_model.encode(chunk_texts)
-st.success(f"PDF ready. {len(pages)} pages and {len(chunks)} searchable chunks prepared.")
+st.success("✅ Document ready")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("📄 File", uploaded_file.name)
+with col2:
+    st.metric("Pages", len(pages))
+with col3:
+    st.metric("Searchable chunks", len(chunks))
+st.divider()
+st.subheader("💬 Chat with your document")
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.write(message["content"])
         if message["role"]=="assistant" and message.get("context"):
             with st.expander(message.get("context_label","Show source context")): st.text(message["context"])
-question=st.chat_input("Ask a question about the PDF")
+question=st.chat_input("Ask anything about this PDF...")
 if question:
     st.session_state.messages.append({"role":"user","content":question})
     with st.chat_message("user"): st.write(question)
     with st.chat_message("assistant"):
         try:
-            with st.spinner("Reading the document and preparing the answer..."):
-                if is_summary_question(question): answer,context=summarize_document(pages,llm_client); label="Show cleaned facts used for summary"
+            with st.spinner("🔎 Searching the document and preparing your answer..."):
+                if is_summary_question(question): answer,context=summarize_document(pages,llm_client); label="🔍 View facts used for summary"
                 else:
-                    selected=retrieve_top_chunks(question,chunks,chunk_embeddings,embedding_model,top_k=5); answer,context=answer_question(question,selected,pages,llm_client); label="Show top retrieved source context"
+                    selected=retrieve_top_chunks(question,chunks,chunk_embeddings,embedding_model,top_k=5); answer,context=answer_question(question,selected,pages,llm_client); label="🔍 View retrieved source context"
             st.write(answer)
             with st.expander(label): st.text(context)
             st.session_state.messages.append({"role":"assistant","content":answer,"context":context,"context_label":label})
