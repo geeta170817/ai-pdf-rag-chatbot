@@ -265,9 +265,26 @@ IMPORTANT RULES:
    container numbers, dates, service modes, and codes, copy the
    exact value from the document.
 
-5. For ETA or arrival questions, identify the requested destination
-   first and return the arrival/ETA associated with that destination.
-   Do not return an earlier transit or intermediate-port date.
+5. For ETA, ETD, arrival, departure, or transport-plan questions,
+   carefully interpret table rows using their column headers.
+
+   If the table contains columns such as:
+   From | To | Mode | Vessel | Voy No. | ETD | ETA
+
+   first locate the row where the "To" destination matches the
+   destination asked by the user.
+
+   Then return the value from the ETA column of THAT SAME ROW.
+
+   Do not use an ETA from an earlier transport leg.
+   Do not confuse ETD with ETA.
+
+   Example:
+   If a row contains:
+   Tauranga Container | Auckland Metroport | Inland RR |
+   2026-11-02 | 2026-11-03
+
+   then Auckland Metroport ETA is 2026-11-03.
 
 6. PDF text may come from tables. A label and its value may appear
    on the same line, next line, or nearby line. Read the surrounding
