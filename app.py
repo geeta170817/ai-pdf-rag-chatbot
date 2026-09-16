@@ -248,16 +248,42 @@ def answer_question(question, selected, pages, client):
     context = format_context(selected)
 
     prompt = f"""
-Answer the question using ONLY the PDF context below.
+Answer the user's question using ONLY the PDF context below.
 
-Rules:
-1. Find the exact information requested by the user.
-2. Read labels, values, tables, numbers and dates carefully.
-3. Do not guess.
-4. Do not answer with a nearby label or heading.
-5. For numbers, IDs, booking numbers, dates and codes, copy the exact value.
-6. If the information is not present in the context, say:
-   I could not find this information in the document.
+IMPORTANT RULES:
+
+1. Find the exact field or information requested.
+
+2. Return the COMPLETE value associated with that field.
+   Do not shorten, summarize, or return only part of the value.
+
+3. For locations, return the complete location exactly as shown
+   in the document, including port/place name, city/state/region,
+   and country when available.
+
+4. For identifiers such as booking numbers, reference numbers,
+   container numbers, dates, service modes, and codes, copy the
+   exact value from the document.
+
+5. For ETA or arrival questions, identify the requested destination
+   first and return the arrival/ETA associated with that destination.
+   Do not return an earlier transit or intermediate-port date.
+
+6. PDF text may come from tables. A label and its value may appear
+   on the same line, next line, or nearby line. Read the surrounding
+   context carefully.
+
+7. Do not return a field label such as "From", "To", "Print Date",
+   "Booking No.", or "ETA" as the answer.
+
+8. Do not guess or use outside knowledge.
+
+9. Return ONLY the final answer.
+   Do not provide reasoning or explanation.
+
+10. If the requested information genuinely cannot be found in the
+    supplied context, return exactly:
+    I could not find this information in the document.
 
 PDF CONTEXT:
 {context}
@@ -269,8 +295,8 @@ FINAL ANSWER:
 """
 
     answer = run_llm(prompt, client, 300)
-    return answer, context
 
+    return answer, context
 def remove_summary_noise(text):
     kept=[]; seen=set(); noise_terms=["maerskline.com","maersk.com","terms and conditions","sanctions laws","all rights reserved","http://","https://","www.","warrant and represent","identified on any list","sanctioned party"]
     for raw_line in text.splitlines():
