@@ -63,19 +63,72 @@ def keywords(text):
     return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) > 1 and w not in stop]
 
 
-def retrieve_top_chunks(question, chunks, chunk_embeddings, embedding_model, top_k=3):
+def retrieve_top_chunks(
+    question,
+    chunks,
+    chunk_embeddings,
+    embedding_model,
+    top_k=5
+):
+    # Create embedding for the user's question
     q_embedding = embedding_model.encode(question)
-    semantic = cosine_similarity([q_embedding], chunk_embeddings)[0]
+
+    # Semantic similarity between question and every chunk
+    semantic_scores = cosine_similarity(
+        [q_embedding],
+        chunk_embeddings
+    )[0]
+
+    question_lower = question.lower()
     q_words = keywords(question)
+
+    # Add common document-field synonyms to improve retrieval
+    expanded_words = set(q_words)
+
+    synonym_map = {
+        "origin": ["origin", "from", "departure", "place of receipt"],
+        "destination": ["destination", "to", "arrival", "place of delivery"],
+        "booking": ["booking", "booking no", "booking number"],
+        "service": ["service", "service mode"],
+        "mode": ["mode", "service mode"],
+        "eta": ["eta", "arrival", "estimated arrival"],
+        "vessel": ["vessel", "ship"],
+        "commodity": ["commodity", "cargo", "goods"],
+    }
+
+    for key, synonyms in synonym_map.items():
+        if key in question_lower:
+            expanded_words.update(synonyms)
+
     scored = []
+
     for i, chunk in enumerate(chunks):
         text_lower = chunk["text"].lower()
-        keyword_hits = sum(1 for word in q_words if word in text_lower)
-        important_phrase = " ".join(q_words)
-        phrase_bonus = 1.0 if important_phrase and important_phrase in text_lower else 0.0
-        score = float(semantic[i]) + (0.35 * keyword_hits) + phrase_bonus
+
+        # Base semantic score
+        score = float(semantic_scores[i])
+
+        # Keyword/synonym matches
+        for word in expanded_words:
+            if word in text_lower:
+                score += 0.35
+
+        # Give stronger weight when important document labels occur
+        for key, synonyms in synonym_map.items():
+            if key in question_lower:
+                for synonym in synonyms:
+                    if synonym in text_lower:
+                        score += 0.75
+
         scored.append((score, i))
-    best = sorted(scored, reverse=True)[:top_k]
+
+    # Highest scoring chunks first
+    best = sorted(
+        scored,
+        key=lambda x: x[0],
+        reverse=True
+    )[:top_k]
+
     return [chunks[i] for _, i in best]
 
 
@@ -281,7 +334,7 @@ if question:
             with st.spinner("Reading the document and preparing the answer..."):
                 if is_summary_question(question): answer,context=summarize_document(pages,llm_client); label="Show cleaned facts used for summary"
                 else:
-                    selected=retrieve_top_chunks(question,chunks,chunk_embeddings,embedding_model,top_k=3); answer,context=answer_question(question,selected,pages,llm_client); label="Show top retrieved source context"
+                    selected=retrieve_top_chunks(question,chunks,chunk_embeddings,embedding_model,top_k=5); answer,context=answer_question(question,selected,pages,llm_client); label="Show top retrieved source context"
             st.write(answer)
             with st.expander(label): st.text(context)
             st.session_state.messages.append({"role":"assistant","content":answer,"context":context,"context_label":label})
